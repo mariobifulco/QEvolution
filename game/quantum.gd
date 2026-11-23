@@ -1,16 +1,17 @@
 extends RefCounted
-## Four-qubit state vector. Complex numbers occupy adjacent real and imaginary doubles.
+## State vector. Complex numbers occupy adjacent real and imaginary doubles.
 
 const PAIRS := [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]]
+const MAX_QUBITS := 4
 const GATES := ["H", "X", "Y", "Z", "RX", "RY", "RZ", "CX", "RZZ", "M"]
 const ROTATIONS := ["RX", "RY", "RZ", "RZZ"]
 const MAX_STEPS := 256
 const EPS := 1.0e-12
 
 
-static func initial() -> PackedFloat64Array:
+static func initial(qubit_count: int = MAX_QUBITS) -> PackedFloat64Array:
 	var state := PackedFloat64Array()
-	state.resize(32)
+	state.resize(2 << qubit_count)
 	state[0] = 1.0
 	return state
 
@@ -21,24 +22,25 @@ static func step(state: PackedFloat64Array, op: Dictionary, draw: float = 0.0) -
 	var gate: String = op.gate
 	if gate == "M":
 		return _measure(next, wires, draw)
+	var basis_size := state.size() >> 1
 	var first := 1 << int(wires[0])
 	if gate == "CX":
 		var target := 1 << int(wires[1])
-		for i in 16:
+		for i in basis_size:
 			if i & first and not i & target:
 				for component in 2:
 					next[2 * i + component] = state[2 * (i | target) + component]
 					next[2 * (i | target) + component] = state[2 * i + component]
 	elif gate == "RZZ":
 		var second := 1 << int(wires[1])
-		for i in 16:
+		for i in basis_size:
 			var parity := bool(i & first) != bool(i & second)
 			_phase(next, 2 * i, float(op.angle) * (0.5 if parity else -0.5))
 	else:
 		var angle: float = op.get("angle", 0.0)
 		var c := cos(angle / 2.0)
 		var s := sin(angle / 2.0)
-		for i in 16:
+		for i in basis_size:
 			if i & first:
 				continue
 			var a := 2 * i
@@ -89,30 +91,35 @@ static func _outcome(index: int, wires: Array) -> int:
 	return value
 
 
+static func probabilities(state: PackedFloat64Array, wires: Array) -> PackedFloat64Array:
+	var values := PackedFloat64Array()
+	values.resize(1 << wires.size())
+	for i in state.size() >> 1:
+		values[_outcome(i, wires)] += state[2 * i] ** 2 + state[2 * i + 1] ** 2
+	return values
+
+
 static func _measure(state: PackedFloat64Array, wires: Array, draw: float) -> Dictionary:
-	var probabilities := PackedFloat64Array()
-	probabilities.resize(1 << wires.size())
-	for i in 16:
-		probabilities[_outcome(i, wires)] += state[2 * i] ** 2 + state[2 * i + 1] ** 2
+	var values := probabilities(state, wires)
 	var total := 0.0
-	for probability in probabilities:
+	for probability in values:
 		total += probability
 	var remaining := clampf(draw, 0.0, 1.0) * total
 	var sampled := 0
-	for value in probabilities.size():
-		if probabilities[value] > 0.0:
+	for value in values.size():
+		if values[value] > 0.0:
 			sampled = value
-			remaining -= probabilities[value]
+			remaining -= values[value]
 			if remaining < 0.0:
 				break
-	var norm := sqrt(probabilities[sampled])
-	for i in 16:
+	var norm := sqrt(values[sampled])
+	for i in state.size() >> 1:
 		var keep := _outcome(i, wires) == sampled
 		_write(state, 2 * i, state[2 * i] / norm if keep else 0.0,
 			state[2 * i + 1] / norm if keep else 0.0)
-	for value in probabilities.size():
-		probabilities[value] /= total
-	return {"state": state, "probabilities": probabilities, "sample": sampled, "wires": wires}
+	for value in values.size():
+		values[value] /= total
+	return {"state": state, "probabilities": values, "sample": sampled, "wires": wires}
 
 
 static func bit_string(value: int, width: int) -> String:
@@ -125,12 +132,14 @@ static func bit_string(value: int, width: int) -> String:
 static func metrics(state: PackedFloat64Array) -> Dictionary:
 	var bloch: Array[Vector3] = []
 	var singles := PackedFloat64Array()
-	for wire in 4:
+	var basis_size := state.size() >> 1
+	var qubit_count := roundi(log(basis_size) / log(2.0))
+	for wire in qubit_count:
 		var mask := 1 << wire
 		var x := 0.0
 		var y := 0.0
 		var z := 0.0
-		for i in 16:
+		for i in basis_size:
 			if i & mask:
 				continue
 			var a := 2 * i
@@ -144,30 +153,43 @@ static func metrics(state: PackedFloat64Array) -> Dictionary:
 
 	var cuts := PackedFloat64Array()
 	var concurrence := PackedFloat64Array()
-	for pair in PAIRS:
-		var matrix := _partition(state, pair)
+	for pair in pairs_for(qubit_count):
+		var matrix := _partition(state, pair, qubit_count)
 		# The first three pairs give the three distinct 2|2 cuts.
-		if cuts.size() < 3:
+		if qubit_count == MAX_QUBITS and cuts.size() < 3:
 			var entropy := 0.0
 			for value in _gram_eigenvalues(matrix):
 				entropy += _entropy(value)
 			cuts.append(entropy)
 		concurrence.append(_concurrence(matrix))
+	var core := float(Array(singles).min()) if qubit_count > 1 else 0.0
+	if not cuts.is_empty():
+		core = minf(core, Array(cuts).min())
 	return {"bloch": bloch, "singles": singles, "cuts": cuts,
-		"pairs": concurrence, "core": minf(Array(singles).min(), Array(cuts).min())}
+		"pairs": concurrence, "core": core}
+
+
+static func pairs_for(qubit_count: int) -> Array:
+	var pairs := []
+	for pair in PAIRS:
+		if pair[1] < qubit_count:
+			pairs.append(pair)
+	return pairs
 
 
 static func _entropy(p: float) -> float:
 	return -p * log(p) / log(2.0) if p > EPS and p < 1.0 else 0.0
 
 
-static func _partition(state: PackedFloat64Array, pair: Array) -> PackedFloat64Array:
+static func _partition(state: PackedFloat64Array, pair: Array, qubit_count: int) -> PackedFloat64Array:
 	var rest := []
-	for wire in 4:
+	for wire in qubit_count:
 		if not pair.has(wire):
 			rest.append(wire)
-	var matrix := state.duplicate()
-	for basis in 16:
+	# Pad the conditional states to four columns for the concurrence solver.
+	var matrix := PackedFloat64Array()
+	matrix.resize(32)
+	for basis in state.size() >> 1:
 		var row := _outcome(basis, pair)
 		var col := _outcome(basis, rest)
 		_write(matrix, 2 * (4 * row + col), state[2 * basis], state[2 * basis + 1])

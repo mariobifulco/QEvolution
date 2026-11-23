@@ -85,9 +85,10 @@ func _ready() -> void:
 
 
 func _arrange_model(yaw: float, pitch: float, zoom: float, focus: int) -> void:
-	var center := Qpu.POSITIONS[focus] as Vector3 if focus >= 0 else Vector3.ZERO
+	var center: Vector3 = _model.qubit_position(focus) if focus >= 0 else Vector3.ZERO
 	_model.rotation = Vector3(pitch * 0.65 - 0.13, -yaw, 0)
-	_model.scale = Vector3.ONE * 0.32 * zoom * (1.45 if focus >= 0 else 1.0)
+	var scale_factor := 1.45 if focus >= 0 or _model.qubit_count == 1 else 1.0
+	_model.scale = Vector3.ONE * 0.32 * zoom * scale_factor
 	_model.position = MODEL_ANCHOR - _model.transform.basis * center
 
 

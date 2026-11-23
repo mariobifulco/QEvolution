@@ -76,12 +76,12 @@ func parse(source: String) -> Dictionary:
 			var size := match_.get_string(2 if declaration != null else 3)
 			var name := match_.get_string(3 if declaration != null else 2)
 			var width := 1 if size.is_empty() else size.to_int()
-			if qubits.has(name) or bits.has(name) or width < 1 or width > 4:
+			if qubits.has(name) or bits.has(name) or width < 1 or width > Quantum.MAX_QUBITS:
 				return _error(line, "Use a unique register name and a size from 1 to 4.")
 			var is_qubit := kind in ["qubit", "qreg"]
 			var offset := qubit_count if is_qubit else 0
 			if is_qubit:
-				if qubit_count + width > 4:
+				if qubit_count + width > Quantum.MAX_QUBITS:
 					return _error(line, "The QPU has four qubits.")
 				qubit_count += width
 			var registers: Dictionary = qubits if is_qubit else bits
@@ -138,7 +138,7 @@ func parse(source: String) -> Dictionary:
 
 	if qubit_count == 0:
 		return {"error": "Declare at least one qubit, for example qubit[4] q;"}
-	return {"ops": ops}
+	return {"ops": ops, "qubit_count": qubit_count}
 
 
 func _operand(source: String, registers: Dictionary) -> Dictionary:
@@ -225,20 +225,21 @@ func _error(line: int, message: String) -> Dictionary:
 	return {"error": "Line %d · %s" % [line, message]}
 
 
-static func encode(ops: Array[Dictionary]) -> String:
+static func encode(ops: Array[Dictionary], qubit_count: int = Quantum.MAX_QUBITS) -> String:
 	var lines := PackedStringArray(["OPENQASM 3.0;", 'include "stdgates.inc";'])
 	for op in ops:
 		if op.gate == "RZZ":
 			lines.append(RZZ)
 			break
-	lines.append("qubit[4] q;")
+	lines.append("qubit[%d] q;" % qubit_count)
 	lines.append("")
+	var all_wires := range(qubit_count)
 	for op in ops:
 		var operands := PackedStringArray()
 		for wire: int in op.wires:
 			operands.append("q[%d]" % wire)
 		if op.gate == "M":
-			if op.wires == [0, 1, 2, 3]:
+			if op.wires == all_wires:
 				lines.append("measure q;")
 			elif op.wires.size() > 1:
 				var indices := PackedStringArray()

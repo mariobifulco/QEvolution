@@ -22,6 +22,20 @@ func _run() -> void:
 
 
 func _check_simulator() -> void:
+	for qubit_count in range(1, Quantum.MAX_QUBITS + 1):
+		var compact := Quantum.initial(qubit_count)
+		_expect(compact.size() == 2 << qubit_count, "State size matches the circuit width")
+		for wire in range(qubit_count):
+			compact = _apply(compact, "X", [wire])
+		var all_wires := range(qubit_count)
+		var values := Quantum.probabilities(compact, all_wires)
+		_expect(values.size() == 1 << qubit_count and _near(values[-1], 1.0), "Full-width outcome probabilities")
+		var compact_metrics := Quantum.metrics(compact)
+		_expect(compact_metrics.bloch.size() == qubit_count and _near(compact_metrics.core, 0.0), "Metrics match active qubits")
+	var three := _apply(_apply(_apply(Quantum.initial(3), "H", [0]), "CX", [0, 1]), "CX", [0, 2])
+	_expect(_near(Quantum.metrics(three).core, 1.0), "GHZ entanglement for three qubits")
+	var asymmetric := _apply(Quantum.initial(3), "X", [0])
+	_expect(_near(Quantum.probabilities(asymmetric, [0, 1, 2])[4], 1.0), "Histogram labels follow circuit wire order")
 	var state := Quantum.initial()
 	var initial := Quantum.metrics(state)
 	_expect(initial.bloch[0].is_equal_approx(Vector3(0, 0, 1)), "Initial Bloch vector")
@@ -83,6 +97,11 @@ func _check_qasm() -> void:
 		_expect(_near(parsed.ops[2].angle, PI / 2) and _near(parsed.ops[4].angle, -0.48), "QASM angle evaluation")
 		var roundtrip := parser.parse(Qasm.encode(parsed.ops))
 		_expect(roundtrip.get("ops", []) == parsed.ops, "QASM export and reimport")
+	var small := parser.parse("OPENQASM 3.0; qubit[3] q; h q[0];")
+	_expect(small.get("qubit_count") == 3, "QASM preserves unused declared qubits")
+	var encoded := Qasm.encode(small.ops, small.qubit_count)
+	_expect(parser.parse(encoded) == small, "QASM round trip preserves compact register width")
+
 	var reversed := parser.parse("OPENQASM 3.0; qubit[4] q; bit[2] c; measure q[{3, 0}] -> c;")
 	_expect(reversed.has("ops") and reversed.ops[0].wires == [3, 0], "Measurement index set and arrow assignment")
 	var compact := parser.parse('OPENQASM 3.0; include  "stdgates.inc"; qubit[4]q; rx(1e-45)q[0];')
@@ -103,27 +122,59 @@ func _check_workbench() -> void:
 	root.add_child(lab)
 	await process_frame
 	var board: Control = lab._board
-	_expect(lab._ops.size() == 3 and lab._next_button.disabled, "Starter circuit and edit state")
+	_expect(lab._qubit_count == 1 and board.qubit_count == 1 and lab.stage.model._arrows.size() == 1
+		and lab._ops[0].gate == "H" and lab._next_button.disabled, "Starter circuit uses one wire and one Bloch sphere")
+	_expect(lab._palette_buttons["CX"].disabled and lab._palette_buttons["RZZ"].disabled, "Paired gates need two wires")
+	_expect(lab._histogram.probabilities == PackedFloat64Array([1.0, 0.0]), "Initial histogram shows |0⟩")
+	await _capture("initial")
+	lab._run_button.pressed.emit()
+	lab._next_button.pressed.emit()
+	var superposition: PackedFloat64Array = lab._histogram.probabilities
+	_expect(_near(superposition[0], 0.5) and _near(superposition[1], 0.5), "Hadamard updates the live histogram")
+	_expect(lab.stage.model._arrows[0].visible and lab._histogram.is_visible_in_tree(), "Hadamard keeps both views visible")
+	await _capture("hadamard")
+	lab._run_button.pressed.emit()
+	for width in range(2, 5):
+		lab._add_qubit_button.pressed.emit()
+		_expect(lab._qubit_count == width and lab.stage.model._arrows.size() == width
+			and lab._histogram.probabilities.size() == 1 << width, "Adding a qubit resizes both views")
+	_expect(lab._add_qubit_button.disabled, "Maximum circuit width")
+	lab._add_qubit()
+	_expect(lab._qubit_count == 4, "Qubits cannot be added beyond the limit")
+	lab._undo_button.pressed.emit()
+	_expect(lab._qubit_count == 3 and lab.stage.model._arrows.size() == 3, "Undo restores circuit width")
+	lab._load_example(1)
+	_expect(lab._qubit_count == 2 and lab._ops[2].wires == [0, 1], "Bell example uses two qubits")
 	lab._run_button.pressed.emit()
 	lab._next_button.pressed.emit()
 	lab._next_button.pressed.emit()
-	_expect(_near(lab._frames[2].metrics.pairs[0], 1), "Next updates the simulation and visualizer")
+	var bell: PackedFloat64Array = lab._histogram.probabilities
+	_expect(_near(lab._frames[2].metrics.pairs[0], 1) and _near(bell[0], 0.5) and _near(bell[3], 0.5),
+		"Bell pair updates the simulation and both views")
 	await _capture("bell")
 	lab._next_button.pressed.emit()
 	var result: int = lab._frames[3].sample
-	_expect(lab.stage.histogram and lab._model_mode.selected == 4, "Measurement opens 3D histogram")
+	_expect(lab.stage.model._arrows.size() == 2 and lab._histogram.is_visible_in_tree()
+		and _near(lab._histogram.probabilities[result], 1.0), "Measurement keeps the 3D state visible beside the collapsed probabilities")
 	await _capture("measurement")
 	lab._back_button.pressed.emit()
-	_expect(not lab.stage.histogram and lab._cursor == 2, "Back restores the previous model")
+	_expect(lab._cursor == 2 and lab._histogram.probabilities == bell, "Back restores the prior probability distribution")
 	lab._next_button.pressed.emit()
 	_expect(lab._frames[3].sample == result, "Forward preserves the recorded measurement")
 	lab._run_button.pressed.emit()
+	lab._add_qubit_button.pressed.emit()
+	var controlled_gate := {"source": 1, "wire": 0}
+	_expect(not board._can_drop_data(board._center(1, 2), controlled_gate), "Paired gate cannot move outside the circuit")
+	board._drop_data(board._center(1, 1), controlled_gate)
+	_expect(lab._ops[1].wires == [1, 2], "Dragging a paired gate preserves control and target order")
+	lab._undo_button.pressed.emit()
+	_expect(lab._ops[1].wires == [0, 1], "Undo restores both operands of a moved gate")
 	lab._challenge_picker.select(3)
 	lab._challenge_picker.item_selected.emit(3)
 	lab._palette_buttons["H"].pressed.emit()
 	board.slot_used.emit(0, 0, "")
 	for wire in [1, 2, 3]:
-		board._drop_data(Vector2(70 + 61 * lab._ops.size() + 30, 53), {"palette_gate": "CX"})
+		board._drop_data(board._center(lab._ops.size(), 0), {"palette_gate": "CX"})
 		board.slot_used.emit(lab._ops.size(), wire, "")
 	lab._run_button.pressed.emit()
 	for i in 4:
@@ -139,12 +190,40 @@ func _check_workbench() -> void:
 	lab._import_qasm()
 	_expect(lab._qasm_layer.visible and lab._ops.size() == 4, "Invalid import leaves the circuit intact")
 	await _capture("qasm")
-	lab._qasm_text.text = "OPENQASM 3.0; qubit[4] q; ry(pi/2) q[2];"
+	lab._qasm_text.text = "OPENQASM 3.0; qubit[3] q; ry(pi/2) q[2];"
 	lab._import_qasm()
-	_expect(not lab._qasm_layer.visible and lab._ops.size() == 1 and lab._ops[0].wires == [2], "Valid QASM replaces the editor circuit")
+	_expect(not lab._qasm_layer.visible and lab._ops.size() == 1 and lab._ops[0].wires == [2] and lab._qubit_count == 3, "Valid QASM replaces the editor circuit")
 	lab._undo_button.pressed.emit()
-	_expect(lab._ops.size() == 4, "Undo restores the circuit before import")
+	_expect(lab._ops.size() == 4 and lab._qubit_count == 4, "Undo restores the circuit and width before import")
+	_check_qubit_removal(lab)
 	lab.queue_free()
+
+
+func _check_qubit_removal(lab: Control) -> void:
+	var source := "OPENQASM 3.0; qubit[4] q; h q[0]; x q[1]; cx q[0], q[1];"
+	source += " rx(pi/2) q[3]; cx q[3], q[2]; measure q[{3, 1, 0}]; measure q[1];"
+	lab._open_qasm()
+	lab._qasm_text.text = source
+	lab._import_qasm()
+	var popup: PopupMenu = lab._remove_qubit_menu.get_popup()
+	_expect(not lab._remove_qubit_menu.disabled and popup.item_count == 4, "Removal menu offers each wire")
+	var original: Array = lab._ops.duplicate(true)
+	lab._run_button.pressed.emit()
+	_expect(lab._remove_qubit_menu.disabled, "Qubit removal is disabled during playback")
+	lab._run_button.pressed.emit()
+	popup.id_pressed.emit(1)
+	_expect(lab._qubit_count == 3 and lab._board.qubit_count == 3 and lab.stage.model._arrows.size() == 3
+		and lab._histogram.probabilities.size() == 8 and popup.item_count == 3, "Removing a wire resizes the editor and both views")
+	_expect(lab._ops.size() == 4 and lab._ops[0].gate == "H" and lab._ops[1].wires == [2]
+		and _near(lab._ops[1].angle, PI / 2) and lab._ops[2].wires == [2, 1]
+		and lab._ops[3].gate == "M" and lab._ops[3].wires == [2, 0], "Removal drops affected gates and preserves surviving operands in order")
+	lab._undo_button.pressed.emit()
+	_expect(lab._qubit_count == 4 and lab._ops == original, "Undo restores the removed wire and its original operations")
+	for wire in [3, 2, 1]:
+		popup.id_pressed.emit(wire)
+	_expect(lab._qubit_count == 1 and lab._remove_qubit_menu.disabled, "Removal stops at one wire")
+	lab._remove_qubit(0)
+	_expect(lab._qubit_count == 1, "The last qubit cannot be removed")
 
 
 func _check_xr_panel() -> void:
@@ -161,15 +240,46 @@ func _check_xr_panel() -> void:
 	await process_frame
 	_expect(xr._rig.visible and xr._rig.position.is_equal_approx(pose.origin), "VR stage anchors to tracked head")
 	var lab: Control = xr._canvas.get_child(0)
+	var stage_rect: Rect2 = lab.stage.get_global_rect()
+	var chart_rect: Rect2 = lab._histogram.get_global_rect()
+	_expect(not stage_rect.intersects(chart_rect) and Rect2(Vector2.ZERO, Vector2(XrLab.CANVAS_SIZE)).encloses(chart_rect),
+		"The model and histogram occupy separate visible areas of the lab")
 	var button: Button = lab._palette_buttons["H"]
 	var from := button.get_global_rect().get_center()
-	var to: Vector2 = lab._board.global_position + Vector2(70 + 61 * 3 + 30, 53)
+	var to: Vector2 = lab._board.global_position + lab._board._center(1, 0)
 	xr._send_pointer(from, false)
 	xr._send_pointer(from, true)
 	xr._send_pointer(from + Vector2(20, 0), true)
 	xr._send_pointer(to, true)
 	xr._send_pointer(to, false)
-	_expect(lab._ops.size() == 4 and lab._ops.back().gate == "H", "Viewport pointer can drag a gate onto the board")
+	_expect(lab._ops.size() == 2 and lab._ops.back().gate == "H", "Viewport pointer can drag a gate onto the board")
+	lab._palette_buttons["X"].pressed.emit()
+	lab._board.slot_used.emit(1, 0, "")
+	lab._add_qubit_button.pressed.emit()
+	await process_frame
+	var first: Vector2 = lab._board.global_position + lab._board._center(0, 0)
+	var moved: Vector2 = lab._board.global_position + lab._board._center(2, 1)
+	xr._send_pointer(first, false)
+	xr._send_pointer(first, true)
+	xr._send_pointer(first + Vector2(20, 0), true)
+	xr._send_pointer(moved, true)
+	xr._send_pointer(moved, false)
+	_expect(lab._ops[0].gate == "X" and lab._ops[2].wires == [1] and lab._selected == 2,
+		"Dragging a placed gate changes its order and wire")
+	_send_key(xr._canvas, KEY_DELETE)
+	_expect(lab._ops.size() == 2 and lab._ops[0].gate == "X", "Delete removes the selected gate")
+	lab._undo_button.pressed.emit()
+	_expect(lab._ops.size() == 3 and lab._ops[2].wires == [1], "Undo restores the deleted gate")
+	lab._undo_button.pressed.emit()
+	_expect(lab._ops[0].gate == "H" and lab._ops[1].gate == "X", "Undo restores the original position")
+	xr._send_pointer(first, false)
+	xr._send_pointer(first, true)
+	xr._send_pointer(first, false)
+	_expect(lab._selected == 0, "Clicking a gate selects it")
+	lab._open_qasm()
+	_send_key(xr._canvas, KEY_DELETE)
+	_expect(lab._ops.size() == 3, "Delete in OpenQASM leaves the circuit intact")
+	lab._close_qasm()
 	var picker: OptionButton = lab._challenge_picker
 	var center := picker.get_global_rect().get_center()
 	xr._send_pointer(center, true)
@@ -183,8 +293,8 @@ func _check_xr_panel() -> void:
 	_expect(lab._mission == 1, "VR viewport selects an embedded option")
 	popup.hide()
 	var run: Button = lab._run_button
-	lab._ops = lab._example(0)
-	lab._refresh_editor()
+	lab._load_example(0)
+	await process_frame
 	var uv := run.get_global_rect().get_center() / Vector2(XrLab.CANVAS_SIZE) - Vector2(0.5, 0.5)
 	var hit: Vector3 = xr._panel.to_global(Vector3(uv.x * XrLab.PANEL_SIZE.x, -uv.y * XrLab.PANEL_SIZE.y, 0))
 	var hand := XRControllerTracker.new()
@@ -203,6 +313,13 @@ func _check_xr_panel() -> void:
 	XRServer.remove_tracker(hand)
 	XRServer.remove_tracker(head)
 	xr.queue_free()
+
+
+func _send_key(viewport: Viewport, key: Key) -> void:
+	var event := InputEventKey.new()
+	event.keycode = key
+	event.pressed = true
+	viewport.push_input(event, true)
 
 
 func _capture(label: String) -> void:

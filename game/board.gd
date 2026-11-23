@@ -2,22 +2,26 @@ extends Control
 
 signal slot_used(column: int, wire: int, gate: String)
 signal erase_requested(column: int)
+signal move_requested(source: int, destination: int, wire_offset: int)
 
 const Palette = preload("res://game/skin.gd")
 const Qpu = preload("res://game/qpu.gd")
+const Quantum = preload("res://game/quantum.gd")
 const LABEL_WIDTH := 70.0
 const COLUMN_WIDTH := 61.0
 const HEADER := 29.0
 const ROW := 49.0
-const MIN_COLUMNS := 10
+const MIN_COLUMNS := 9
 
 var ops: Array[Dictionary] = []
+var qubit_count := 1
 var selected := -1
 var active := -1
 var locked := false
 var pending := Vector2i(-1, -1)
 var _cell := Vector2i(-1, -1)
 var _keyboard := Vector2i.ZERO
+var _pressed_slot := Vector2i(-1, -1)
 
 
 func _ready() -> void:
@@ -27,13 +31,15 @@ func _ready() -> void:
 	focus_entered.connect(queue_redraw)
 	focus_exited.connect(queue_redraw)
 	get_parent().get_h_scroll_bar().value_changed.connect(func(_offset: float): queue_redraw())
-	accessibility_name = "Circuit editor grid. Use arrows to move and Enter to use a slot."
+	accessibility_name = "Circuit editor. Use arrows to move, Enter to select or place, and Delete to remove the selected gate."
 	refresh()
 
 
 func refresh() -> void:
-	custom_minimum_size = Vector2(LABEL_WIDTH + _columns() * COLUMN_WIDTH + 9, HEADER + ROW * 4 + 10)
+	custom_minimum_size = Vector2(LABEL_WIDTH + _columns() * COLUMN_WIDTH + 9, HEADER + ROW * qubit_count + 4)
 	_keyboard.x = mini(_keyboard.x, _columns() - 1)
+	_keyboard.y = mini(_keyboard.y, qubit_count - 1)
+	_cell = Vector2i(-1, -1)
 	queue_redraw()
 
 
@@ -44,7 +50,8 @@ func _columns() -> int:
 func _draw() -> void:
 	var font := get_theme_default_font()
 	draw_rect(Rect2(Vector2.ZERO, size), Color("#0c1224"))
-	for row in 4:
+	var grid_height := HEADER + ROW * qubit_count
+	for row in qubit_count:
 		var y := HEADER + ROW * row
 		if row % 2 == 0:
 			draw_rect(Rect2(0, y, size.x, ROW), Color("#10182e"))
@@ -52,8 +59,8 @@ func _draw() -> void:
 			Color("#384668"), 1.5, true)
 	for column in _columns():
 		var x := LABEL_WIDTH + column * COLUMN_WIDTH
-		var column_rect := Rect2(x, 0, COLUMN_WIDTH, HEADER + ROW * 4)
-		draw_line(Vector2(x, HEADER), Vector2(x, HEADER + ROW * 4), Color("#202d49"), 1)
+		var column_rect := Rect2(x, 0, COLUMN_WIDTH, grid_height)
+		draw_line(Vector2(x, HEADER), Vector2(x, grid_height), Color("#202d49"), 1)
 		if column == active or column == selected:
 			var color := Palette.AQUA if column == active else Palette.LILAC
 			draw_rect(column_rect, Color(color, 0.09))
@@ -61,7 +68,7 @@ func _draw() -> void:
 		draw_string(font, Vector2(x, 19), "%02d" % (column + 1), HORIZONTAL_ALIGNMENT_CENTER,
 			COLUMN_WIDTH, 11, Palette.MUTED if column < ops.size() else Palette.FAINT.darkened(0.10))
 		if column >= ops.size():
-			for row in 4:
+			for row in qubit_count:
 				draw_circle(_center(column, row), 2, Color("#596889"), true, -1, true)
 
 	var focused := _cell if _cell.x >= 0 else _keyboard if has_focus() else Vector2i(-1, -1)
@@ -99,7 +106,7 @@ func _draw_wire_labels(font: Font) -> void:
 	var scroll := get_parent() as ScrollContainer
 	var x := float(scroll.scroll_horizontal)
 	draw_rect(Rect2(x, 0, LABEL_WIDTH, HEADER), Color("#0c1224"))
-	for row in 4:
+	for row in qubit_count:
 		var y := HEADER + ROW * row
 		var mid := y + ROW / 2
 		draw_rect(Rect2(x, y, LABEL_WIDTH, ROW), Color("#10182e") if row % 2 == 0 else Color("#0c1224"))
@@ -126,7 +133,7 @@ func _slot(pos: Vector2) -> Vector2i:
 	if pos.x < scroll.scroll_horizontal + LABEL_WIDTH:
 		return Vector2i(-1, -1)
 	var slot := Vector2i(floori((pos.x - LABEL_WIDTH) / COLUMN_WIDTH), floori((pos.y - HEADER) / ROW))
-	if slot.x < 0 or slot.x >= _columns() or slot.y < 0 or slot.y >= 4:
+	if slot.x < 0 or slot.x >= _columns() or slot.y < 0 or slot.y >= qubit_count:
 		return Vector2i(-1, -1)
 	return slot
 
@@ -135,16 +142,19 @@ func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
 		_cell = _slot(event.position)
 		queue_redraw()
-	elif event is InputEventMouseButton and event.pressed:
+	elif event is InputEventMouseButton:
 		var slot := _slot(event.position)
-		if slot.x < 0:
-			return
 		if event.button_index == MOUSE_BUTTON_LEFT:
-			grab_focus()
-			_keyboard = slot
-			slot_used.emit(slot.x, slot.y, "")
+			if event.pressed and slot.x >= 0:
+				grab_focus()
+				_pressed_slot = slot
+			elif not event.pressed:
+				if slot.x >= 0 and slot == _pressed_slot:
+					_keyboard = slot
+					slot_used.emit(slot.x, slot.y, "")
+				_pressed_slot = Vector2i(-1, -1)
 			accept_event()
-		elif event.button_index == MOUSE_BUTTON_RIGHT and not locked and slot.x < ops.size():
+		elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed and not locked and slot.x >= 0 and slot.x < ops.size():
 			erase_requested.emit(slot.x)
 			accept_event()
 	elif event is InputEventKey and event.pressed:
@@ -152,11 +162,8 @@ func _gui_input(event: InputEvent) -> void:
 			KEY_LEFT: _keyboard.x = maxi(_keyboard.x - 1, 0)
 			KEY_RIGHT: _keyboard.x = mini(_keyboard.x + 1, _columns() - 1)
 			KEY_UP: _keyboard.y = maxi(_keyboard.y - 1, 0)
-			KEY_DOWN: _keyboard.y = mini(_keyboard.y + 1, 3)
+			KEY_DOWN: _keyboard.y = mini(_keyboard.y + 1, qubit_count - 1)
 			KEY_ENTER, KEY_SPACE: slot_used.emit(_keyboard.x, _keyboard.y, "")
-			KEY_DELETE, KEY_BACKSPACE:
-				if not locked and _keyboard.x < ops.size():
-					erase_requested.emit(_keyboard.x)
 			_: return
 		_cell = Vector2i(-1, -1)
 		keep_visible(_keyboard.x)
@@ -188,10 +195,43 @@ func keep_visible(column: int) -> void:
 		bar.value = x + COLUMN_WIDTH - scroll.size.x
 
 
+func _get_drag_data(at_position: Vector2) -> Variant:
+	var slot := _slot(at_position)
+	if locked or slot.x < 0 or slot.x >= ops.size() or not ops[slot.x].wires.has(slot.y):
+		return null
+	_pressed_slot = Vector2i(-1, -1)
+	set_drag_preview(gate_preview(ops[slot.x].gate))
+	return {"source": slot.x, "wire": slot.y}
+
+
+static func gate_preview(gate: String) -> Label:
+	var chip := Label.new()
+	chip.text = "  %s  " % gate
+	chip.add_theme_color_override("font_color", Palette.gate_color(gate))
+	chip.add_theme_stylebox_override("normal", Palette.box(Color("#26304a"), Palette.gate_color(gate)))
+	return chip
+
+
 func _can_drop_data(at_position: Vector2, data: Variant) -> bool:
-	return not locked and data is Dictionary and data.has("palette_gate") and _slot(at_position).x >= 0
+	var slot := _slot(at_position)
+	if locked or slot.x < 0 or not data is Dictionary:
+		return false
+	if data.has("palette_gate"):
+		return data.palette_gate in Quantum.GATES and (qubit_count >= 2 or data.palette_gate not in ["CX", "RZZ"])
+	if not data.has("source") or not data.has("wire") or data.source < 0 or data.source >= ops.size():
+		return false
+	var offset: int = slot.y - data.wire
+	var wires: Array = ops[data.source].wires
+	return wires.min() + offset >= 0 and wires.max() + offset < qubit_count
 
 
 func _drop_data(at_position: Vector2, data: Variant) -> void:
+	if not _can_drop_data(at_position, data):
+		return
 	var slot := _slot(at_position)
-	slot_used.emit(slot.x, slot.y, data.palette_gate)
+	grab_focus()
+	_keyboard = slot
+	if data.has("palette_gate"):
+		slot_used.emit(slot.x, slot.y, data.palette_gate)
+	else:
+		move_requested.emit(data.source, slot.x, slot.y - data.wire)

@@ -10,7 +10,6 @@ var yaw := 0.41
 var pitch := 0.19
 var zoom := 1.0
 var focus := -1
-var histogram := false
 var _orbiting := false
 
 
@@ -49,11 +48,11 @@ func _ready() -> void:
 	reset_view()
 
 
-func display(metrics: Dictionary, frame: Dictionary, section: int, show_histogram: bool) -> void:
-	if histogram != show_histogram:
-		histogram = show_histogram
+func display(metrics: Dictionary, section: int) -> void:
+	var changed: bool = model.qubit_count != metrics.bloch.size()
+	model.display(metrics, section)
+	if changed:
 		reset_view()
-	model.display(metrics, frame, section, show_histogram)
 
 
 func orbit(delta: float) -> void:
@@ -73,20 +72,18 @@ func focus_on(wire: int) -> void:
 
 
 func reset_view() -> void:
-	yaw = 0.13 if histogram else 0.41
-	pitch = 0.25 if histogram else 0.19
+	yaw = 0.41
+	pitch = 0.19
 	zoom = 1.0
 	focus = -1
 	_update_camera()
 
 
 func _update_camera() -> void:
-	var center := Vector3(0, 0.13, 0)
-	var distance := 6.8
-	if histogram:
-		distance = 7.7
-	elif focus >= 0:
-		center = Qpu.POSITIONS[focus]
+	var center := Vector3(0, 0.10, 0)
+	var distance := float([2.5, 3.65, 4.7, 5.8][maxi(0, model.qubit_count - 1)])
+	if focus >= 0:
+		center = model.qubit_position(focus)
 		distance = 2.25
 	var direction := Vector3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch))
 	camera.position = center + direction * distance / zoom
@@ -112,15 +109,6 @@ func _gui_input(event: InputEvent) -> void:
 
 func _draw() -> void:
 	draw_rect(Rect2(Vector2.ZERO, size), Color("#0b1228"))
-	var center := size * Vector2(0.5, 0.49)
-	for i in range(7, 0, -1):
-		var radius := 19.0 + i * size.x / 16.0
-		draw_circle(center, radius, Color(0.17, 0.24, 0.45, 0.10), true, -1, true)
-	for x in range(20, int(size.x), 24):
-		for y in range(20, int(size.y), 24):
-			draw_circle(Vector2(x, y), 0.75, Color(0.40, 0.50, 0.76, 0.22))
-	var ends := [Vector2(13, 13), Vector2(size.x - 13, 13), Vector2(13, size.y - 13), size - Vector2(13, 13)]
-	for corner: Vector2 in ends:
-		var inward := (center - corner).sign()
-		draw_line(corner, corner + Vector2(13 * inward.x, 0), Color("#42537e"), 1)
-		draw_line(corner, corner + Vector2(0, 13 * inward.y), Color("#42537e"), 1)
+	for x in range(16, int(size.x), 24):
+		for y in range(16, int(size.y), 24):
+			draw_circle(Vector2(x, y), 0.75, Color(0.40, 0.50, 0.76, 0.20))

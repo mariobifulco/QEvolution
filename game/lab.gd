@@ -6,6 +6,7 @@ const Qpu = preload("res://game/qpu.gd")
 const Palette = preload("res://game/skin.gd")
 const Board = preload("res://game/board.gd")
 const Stage = preload("res://game/stage.gd")
+const Histogram = preload("res://game/histogram.gd")
 const ICON = preload("res://game/icon.svg")
 
 const GATE_HELP := {
@@ -20,21 +21,30 @@ const GATE_HELP := {
 	"RZZ": "ZZ rotation · choose two qubits",
 	"M": "Measure one qubit in the computational basis",
 }
+const EXAMPLES := ["Hadamard", "Bell pair", "Two Bell pairs", "GHZ₄", "Phase interference"]
+const EXAMPLE_WIDTHS := [1, 2, 4, 4, 1]
+const MISSION_WIDTHS := [1, 2, 4, 4]
+const CUT_NAMES := ["AB | CD", "AC | BD", "AD | BC"]
 const MISSIONS := ["Free lab", "Bell pair", "Two Bell pairs", "Four-way entanglement"]
 const GOALS := [
 	"Build a circuit freely or choose a challenge.",
-	"Entangle A and B maximally while C and D stay pure. Hint: H, then CX.",
+	"Entangle A and B maximally. Hint: H, then CX.",
 	"Create two independent Bell pairs, AB and CD. Look for two bright edges.",
-	"Entangle all four qubits across every cut. Aim for a 1-bit core.",
+	"Entangle all four qubits with at least 1 bit of entropy across each cut.",
 ]
 
-signal presentation_changed(metrics: Dictionary, frame: Dictionary, section: int, histogram: bool)
+signal presentation_changed(metrics: Dictionary, section: int)
 
 var stage: Control
+var _histogram: Control
+var _measurement_info: Label
 var _board: Control
 var _palette_buttons: Dictionary = {}
 var _editor_controls: Array[Control] = []
 var _undo_button: Button
+var _add_qubit_button: Button
+var _remove_qubit_menu: MenuButton
+var _qubit_label: Label
 var _delete_button: Button
 var _run_button: Button
 var _play_button: Button
@@ -45,11 +55,11 @@ var _angle: SpinBox
 var _work_hint: Label
 var _step_label: Label
 var _step_info: Label
-var _stage_badge: Label
 var _model_info: Label
 var _model_mode: OptionButton
 var _focus_menu: OptionButton
 var _wire_readouts: Array[Label] = []
+var _wire_cards: Array[Control] = []
 var _challenge_picker: OptionButton
 var _challenge_hint: Label
 var _qasm_layer: Control
@@ -57,8 +67,9 @@ var _qasm_text: TextEdit
 var _qasm_status: Label
 var _timer: Timer
 
+var _qubit_count := 1
 var _ops: Array[Dictionary] = []
-var _undo: Array = []
+var _undo: Array[Dictionary] = []
 var _frames: Array[Dictionary] = []
 var _parser := Qasm.new()
 var _rng := RandomNumberGenerator.new()
@@ -89,42 +100,31 @@ func _build() -> void:
 	background.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(background)
 
-	var root_margin := _margin(self, 28, 20)
+	var root_margin := _margin(self, 28, 22)
 	root_margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	var root := _stack(root_margin, 13)
-	var header := _row(root, 13)
-	header.custom_minimum_size.y = 50
+	var root := _stack(root_margin, 17)
+	var header := _row(root, 12)
 	var logo := TextureRect.new()
 	logo.texture = ICON
 	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	logo.custom_minimum_size = Vector2(45, 45)
+	logo.custom_minimum_size = Vector2(42, 42)
 	header.add_child(logo)
 	var branding := _stack(header, 0)
-	branding.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	_heading(branding, "QEvolution", 25)
-	_label(branding, "Q U A N T U M   C I R C U I T   L A B", 10, Palette.MUTED)
-	_space(header)
-	_badge(header, "4 QUBITS", Palette.LILAC)
-	_badge(header, "●   IDEAL SIMULATOR", Palette.AQUA)
+	_heading(branding, "QEvolution", 24)
+	_label(branding, "Quantum circuit lab", 13, Palette.MUTED)
 
-	var columns := _row(root, 14)
+	var columns := _row(root, 16)
 	columns.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	var work := _card(columns, Color("#11172c"), 18, 15)
+	var work := _stack(columns, 12)
 	work.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	work.size_flags_stretch_ratio = 1.23
-	var work_col := _stack(work, 9)
-	_build_workbench(work_col)
-	var inspect := _card(columns, Color("#11172c"), 18, 15)
+	work.size_flags_stretch_ratio = 1.13
+	_build_workbench(work)
+	columns.add_child(VSeparator.new())
+	var inspect := _stack(columns, 12)
 	inspect.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	inspect.size_flags_stretch_ratio = 1.0
-	var inspect_col := _stack(inspect, 9)
-	_build_inspector(inspect_col)
+	_build_inspector(inspect)
 
-	var footer := _row(root, 10)
-	_label(footer, "QEVOLUTION  /  STATE VECTOR LAB", 11, Palette.FAINT)
-	_space(footer)
-	_label(footer, "OpenQASM 3.0     /     Noiseless simulation     /     All-to-all topology", 11, Palette.FAINT)
 	_build_qasm_overlay()
 
 	_timer = Timer.new()
@@ -134,24 +134,22 @@ func _build() -> void:
 
 
 func _build_workbench(work: VBoxContainer) -> void:
-	var top := _row(work, 8)
-	var titles := _stack(top, 1)
-	_label(titles, "01  /  WORKBENCH", 12, Palette.AQUA)
-	_heading(titles, "Circuit Composer", 32)
+	var editor := _stack(_card(work, Palette.PANEL, 16, 14), 10)
+	var top := _row(editor, 8)
+	_heading(top, "Circuit", 23)
 	_space(top)
 	var examples := MenuButton.new()
 	examples.text = "Examples  ▾"
 	examples.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	top.add_child(examples)
-	for name_ in ["Bell pair", "Two Bell pairs", "GHZ₄", "Phase interference"]:
-		examples.get_popup().add_item(name_)
-	examples.get_popup().id_pressed.connect(func(id: int): _replace_ops(_example(id), "Example loaded."))
+	for example in EXAMPLES:
+		examples.get_popup().add_item(example)
+	examples.get_popup().id_pressed.connect(_load_example)
 	_editor_controls.append(examples)
 	_editor_controls.append(_button(top, "OpenQASM", _open_qasm, "Import or copy OpenQASM 3.0"))
-	_label(work, "Place gates on four wires, then replay the state one operation at a time.", 14, Palette.MUTED)
 
-	var tools := _stack(_card(work, Color("#0d1428"), 10, 8), 6)
-	var gate_row := _row(tools, 5)
+	var gate_row := _row(editor, 5)
+	_label(gate_row, "Gates", 13, Palette.MUTED)
 	for gate in Quantum.GATES:
 		var tile := _button(gate_row, gate, _arm.bind(gate), GATE_HELP[gate])
 		tile.toggle_mode = true
@@ -159,10 +157,30 @@ func _build_workbench(work: VBoxContainer) -> void:
 		tile.add_theme_color_override("font_color", Palette.gate_color(gate))
 		tile.set_drag_forwarding(_drag_gate.bind(gate), Callable(), Callable())
 		_palette_buttons[gate] = tile
-		_editor_controls.append(tile)
 
-	var angles := _row(tools, 8)
-	_label(angles, "ROTATION", 11, Palette.MUTED)
+	var board_header := _row(editor, 8)
+	_qubit_label = _label(board_header, "", 14, Palette.INK)
+	_space(board_header)
+	_remove_qubit_menu = MenuButton.new()
+	_remove_qubit_menu.text = "Remove qubit  ▾"
+	_remove_qubit_menu.tooltip_text = "Remove a wire and the gates that use it. Undo restores the circuit."
+	_remove_qubit_menu.get_popup().id_pressed.connect(_remove_qubit)
+	board_header.add_child(_remove_qubit_menu)
+	_add_qubit_button = _button(board_header, "+ Add qubit", _add_qubit, "Add a wire initialized in |0⟩")
+	var board_frame := _card(editor, Color("#0c1224"), 1, 1)
+	var scroll := ScrollContainer.new()
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	board_frame.add_child(scroll)
+	_board = Board.new()
+	_board.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_board.slot_used.connect(_use_slot)
+	_board.erase_requested.connect(_remove)
+	_board.move_requested.connect(_move_gate)
+	scroll.add_child(_board)
+
+	var edits := _row(editor, 6)
+	_label(edits, "Rotation", 13, Palette.MUTED)
 	_angle = SpinBox.new()
 	_angle.min_value = -360
 	_angle.max_value = 360
@@ -172,39 +190,24 @@ func _build_workbench(work: VBoxContainer) -> void:
 	_angle.value = 90.0
 	_angle.suffix = "°"
 	_angle.custom_minimum_size.x = 92
-	_angle.tooltip_text = "Angle for RX, RY, RZ or RZZ in degrees. Select a placed rotation to adjust it."
+	_angle.tooltip_text = "Select a rotation gate to edit its angle in degrees."
 	_angle.value_changed.connect(_edit_angle)
-	angles.add_child(_angle)
-	_space(angles)
-	_editor_controls.append(_button(angles, "Measure all", _append_measurement, "Append a joint measurement of A, B, C and D"))
-	_editor_controls.append(_button(angles, "Select", _arm.bind(""), "Cancel the active tool and select an existing gate"))
-
-	var board_frame := _card(work, Color("#0c1224"), 1, 1)
-	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size.y = 242
-	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_ALWAYS
-	board_frame.add_child(scroll)
-	_board = Board.new()
-	_board.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_board.slot_used.connect(_use_slot)
-	_board.erase_requested.connect(_remove)
-	scroll.add_child(_board)
-
-	var edits := _row(work, 6)
-	_work_hint = _label(edits, "", 13, Palette.MUTED)
-	_work_hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_work_hint.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	edits.add_child(_angle)
+	_editor_controls.append(_button(edits, "Measure all", _append_measurement, "Measure all circuit wires together"))
+	_space(edits)
+	_editor_controls.append(_button(edits, "Select", _arm.bind(""), "Cancel the active gate tool"))
 	_undo_button = _button(edits, "Undo", _undo_edit, "Undo the last circuit edit")
-	_delete_button = _button(edits, "Delete", func(): _remove(_selected), "Delete the selected operation")
+	_delete_button = _button(edits, "Delete", func(): _remove(_selected), "Delete or Backspace removes the selected gate")
 	_editor_controls.append(_button(edits, "Clear", func(): _replace_ops([], "Circuit cleared.")))
 
-	var transport := _stack(_card(work, Color("#141d35"), 11, 8), 6)
+	_work_hint = _label(editor, "", 13, Palette.MUTED)
+	_work_hint.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+
+	var transport := _stack(_card(work, Palette.PANEL, 16, 12), 9)
 	var position := _row(transport, 8)
-	_step_label = _label(position, "", 12, Palette.AQUA)
-	_step_info = _label(position, "", 13, Palette.MUTED)
-	_step_info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_step_info.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	_heading(position, "Playback", 17)
+	_space(position)
+	_step_label = _label(position, "", 13, Palette.AQUA)
 	var controls := _row(transport, 6)
 	_run_button = _button(controls, "Run circuit", _toggle_run)
 	Palette.accent(_run_button)
@@ -213,10 +216,12 @@ func _build_workbench(work: VBoxContainer) -> void:
 	_back_button = _button(controls, "← Back", func(): _show_step(_cursor - 1), "Return to the previous state")
 	_play_button = _button(controls, "▶ Play", _toggle_play)
 	_next_button = _button(controls, "Next →", func(): _show_step(_cursor + 1), "Apply the next operation")
+	_step_info = _label(transport, "", 13, Palette.MUTED)
+	_step_info.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 
-	var challenge := _stack(_card(work, Color("#171a34"), 11, 7), 2)
+	var challenge := _stack(_card(work, Palette.PANEL, 16, 12), 6)
 	var challenge_row := _row(challenge, 8)
-	_label(challenge_row, "◇   CHALLENGE", 11, Palette.LILAC)
+	_heading(challenge_row, "Challenge", 17)
 	_space(challenge_row)
 	_challenge_picker = OptionButton.new()
 	for title in MISSIONS:
@@ -224,62 +229,66 @@ func _build_workbench(work: VBoxContainer) -> void:
 	_challenge_picker.item_selected.connect(_choose_mission)
 	challenge_row.add_child(_challenge_picker)
 	_challenge_hint = _label(challenge, "", 13, Palette.MUTED)
+	_challenge_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 
 
 func _build_inspector(inspect: VBoxContainer) -> void:
-	var top := _row(inspect, 8)
-	var titles := _stack(top, 1)
-	_label(titles, "02  /  STATE VISUALIZER", 12, Palette.AQUA)
-	_heading(titles, "Quantum Processor", 32)
-	_space(top)
-	_badge(top, "LIVE MODEL", Palette.LILAC)
-	_label(inspect, "A tetrahedron of local states and entanglement.", 14, Palette.MUTED)
+	var state_card := _card(inspect, Palette.PANEL, 16, 14)
+	state_card.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var state := _stack(state_card, 8)
+	var controls := _row(state, 6)
+	_heading(controls, "Quantum state", 23)
+	_space(controls)
+	_model_mode = OptionButton.new()
+	_model_mode.add_item("Tetrahedron")
+	for label in CUT_NAMES:
+		_model_mode.add_item(label)
+	_model_mode.item_selected.connect(func(_index: int): _render_model())
+	controls.add_child(_model_mode)
+	_focus_menu = OptionButton.new()
+	_focus_menu.item_selected.connect(func(index: int): stage.focus_on(index - 1))
+	controls.add_child(_focus_menu)
+	_button(controls, "Reset view", _reset_view, "Reset the camera")
 
 	stage = Stage.new()
-	stage.custom_minimum_size.y = 346
+	stage.custom_minimum_size.y = 258
 	stage.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	inspect.add_child(stage)
-	var overlay := _margin(stage, 23, 20)
-	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	var overlay_col := _stack(overlay, 5)
-	overlay_col.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_stage_badge = _label(overlay_col, "", 11, Palette.AQUA)
-	var spacer := Control.new()
-	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	overlay_col.add_child(spacer)
-	_label(overlay_col, "DRAG TO ORBIT   /   SCROLL TO ZOOM", 10, Palette.MUTED)
+	stage.tooltip_text = "Drag to orbit. Scroll to zoom."
+	var viewport_card := _card(state, Color("#0b1228"), 1, 1)
+	viewport_card.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	viewport_card.add_child(stage)
 
-	var view_controls := _row(inspect, 5)
-	_model_mode = OptionButton.new()
-	for label in ["Tetrahedron", "AB | CD", "AC | BD", "AD | BC", "Histogram"]:
-		_model_mode.add_item(label)
-	_model_mode.set_item_disabled(4, true)
-	_model_mode.item_selected.connect(func(_index: int): _render_model())
-	view_controls.add_child(_model_mode)
-	_focus_menu = OptionButton.new()
-	for label in ["Focus: all", "Focus: A", "Focus: B", "Focus: C", "Focus: D"]:
-		_focus_menu.add_item(label)
-	_focus_menu.item_selected.connect(func(index: int): stage.focus_on(index - 1))
-	view_controls.add_child(_focus_menu)
-	_space(view_controls)
-	_button(view_controls, "⟲", func(): stage.orbit(-0.24), "Orbit left")
-	_button(view_controls, "⟳", func(): stage.orbit(0.24), "Orbit right")
-	_button(view_controls, "−", func(): stage.magnify(1.0 / 1.2), "Zoom out")
-	_button(view_controls, "+", func(): stage.magnify(1.2), "Zoom in")
-	_button(view_controls, "Reset", _reset_view, "Reset the camera")
-	_model_info = _label(inspect, "", 14, Palette.AQUA)
+	var view_row := _row(state, 4)
+	_model_info = _label(view_row, "", 13, Palette.MUTED)
+	_model_info.mouse_filter = Control.MOUSE_FILTER_PASS
+	_model_info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_model_info.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	_button(view_row, "⟲", func(): stage.orbit(-0.24), "Orbit left")
+	_button(view_row, "⟳", func(): stage.orbit(0.24), "Orbit right")
+	_button(view_row, "−", func(): stage.magnify(1.0 / 1.2), "Zoom out")
+	_button(view_row, "+", func(): stage.magnify(1.2), "Zoom in")
 
-	var readouts := _row(inspect, 6)
-	for wire in 4:
-		var card := _card(readouts, Color("#101a30"), 8, 5)
+	var readouts := _row(state, 6)
+	for wire in Quantum.MAX_QUBITS:
+		var card := _card(readouts, Color("#101a30"), 9, 5)
 		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var tile := _stack(card, 1)
+		var tile := _stack(card, 2)
 		_label(tile, "%s  /  q%d" % [Qpu.NAMES[wire], wire], 12, Qpu.COLORS[wire])
 		_wire_readouts.append(_label(tile, "", 12, Palette.INK))
-	_label(inspect, "VECTOR  Bloch length    /    EDGE  Concurrence    /    FACE  1|3 entropy", 11, Palette.MUTED)
-	_label(inspect, "SECTION  2|2 entropy    /    CORE  Minimum entropy across all seven cuts", 11, Palette.MUTED)
+		_wire_readouts.back().mouse_filter = Control.MOUSE_FILTER_PASS
+		_wire_cards.append(card)
+
+	var chart := _stack(_card(inspect, Palette.PANEL, 16, 14), 4)
+	var chart_header := _row(chart, 8)
+	_heading(chart_header, "Outcome probabilities", 19)
+	_space(chart_header)
+	_label(chart_header, "Computational basis", 12, Palette.MUTED)
+	_histogram = Histogram.new()
+	_histogram.custom_minimum_size.y = 154
+	chart.add_child(_histogram)
+	_measurement_info = _label(chart, "", 13, Palette.MUTED)
+	_measurement_info.mouse_filter = Control.MOUSE_FILTER_PASS
+	_measurement_info.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 
 
 func _build_qasm_overlay() -> void:
@@ -315,13 +324,9 @@ func _build_qasm_overlay() -> void:
 
 
 func _drag_gate(_position: Vector2, gate: String) -> Variant:
-	if _running:
+	if _palette_buttons[gate].disabled:
 		return null
-	var chip := Label.new()
-	chip.text = "  %s  " % gate
-	chip.add_theme_color_override("font_color", Palette.gate_color(gate))
-	chip.add_theme_stylebox_override("normal", Palette.box(Color("#29304c"), Palette.gate_color(gate)))
-	_palette_buttons[gate].set_drag_preview(chip)
+	_palette_buttons[gate].set_drag_preview(Board.gate_preview(gate))
 	return {"palette_gate": gate}
 
 
@@ -351,13 +356,34 @@ func _use_slot(column: int, wire: int, dragged: String) -> void:
 			_refresh_editor()
 		else:
 			_insert(column, _operation(_armed, [wire]))
-	elif column < _ops.size():
-		_selected = column
-		if _ops[column].gate in Quantum.ROTATIONS:
-			_angle_is_syncing = true
-			_angle.value = rad_to_deg(_ops[column].angle)
-			_angle_is_syncing = false
-		_refresh_editor()
+	else:
+		_select_gate(column if column < _ops.size() else -1)
+
+
+func _select_gate(index: int) -> void:
+	_selected = index
+	if index >= 0 and _ops[index].gate in Quantum.ROTATIONS:
+		_angle_is_syncing = true
+		_angle.value = rad_to_deg(_ops[index].angle)
+		_angle_is_syncing = false
+	_refresh_editor()
+
+
+func _move_gate(source: int, destination: int, wire_offset: int) -> void:
+	if _running:
+		return
+	destination = mini(destination, _ops.size() - 1)
+	if destination != source or wire_offset != 0:
+		_record_edit()
+		var op := _ops.pop_at(source) as Dictionary
+		if wire_offset != 0:
+			op = op.duplicate()
+			op.wires = op.wires.map(func(wire: int): return wire + wire_offset)
+		_ops.insert(destination, op)
+	_armed = ""
+	_pending = Vector2i(-1, -1)
+	_select_gate(destination)
+	_board.keep_visible.call_deferred(destination)
 
 
 func _operation(gate: String, wires: Array) -> Dictionary:
@@ -381,24 +407,42 @@ func _insert(index: int, op: Dictionary) -> void:
 
 
 func _append_measurement() -> void:
-	_insert(_ops.size(), _operation("M", [0, 1, 2, 3]))
+	_insert(_ops.size(), _operation("M", range(_qubit_count)))
+
+
+func _add_qubit() -> void:
+	if not _running and _qubit_count < Quantum.MAX_QUBITS:
+		_replace_ops(_ops, "", _qubit_count + 1)
+
+
+func _remove_qubit(wire: int) -> void:
+	if _running or _qubit_count <= 1 or wire < 0 or wire >= _qubit_count:
+		return
+	var remaining: Array[Dictionary] = []
+	for op in _ops:
+		var operands: Array = op.wires
+		if operands.has(wire) and (op.gate != "M" or operands.size() == 1):
+			continue
+		var updated := op.duplicate()
+		updated.wires = []
+		for operand: int in operands:
+			if operand != wire:
+				updated.wires.append(operand - 1 if operand > wire else operand)
+		remaining.append(updated)
+	_replace_ops(remaining, "Removed qubit %s. Use Undo to restore the circuit." % Qpu.NAMES[wire], _qubit_count - 1)
 
 
 func _record_edit() -> void:
-	_undo.append(_ops.duplicate())
+	_undo.append({"ops": _ops.duplicate(), "qubit_count": _qubit_count})
 	if _undo.size() > 40:
 		_undo.pop_front()
 
 
-func _replace_ops(ops: Array[Dictionary], message: String) -> void:
+func _replace_ops(ops: Array[Dictionary], message: String, qubit_count: int = 0) -> void:
 	if _running:
 		_toggle_run()
 	_record_edit()
-	_ops = ops
-	_selected = -1
-	_pending = Vector2i(-1, -1)
-	_armed = ""
-	_refresh_editor()
+	_set_circuit(ops, _qubit_count if qubit_count == 0 else qubit_count)
 	if not message.is_empty():
 		_hint(message)
 
@@ -406,12 +450,23 @@ func _replace_ops(ops: Array[Dictionary], message: String) -> void:
 func _undo_edit() -> void:
 	if _undo.is_empty():
 		return
-	_ops = _undo.pop_back()
+	var previous := _undo.pop_back() as Dictionary
+	_set_circuit(previous.ops, previous.qubit_count)
+	_hint("Last edit undone.")
+
+
+func _set_circuit(ops: Array[Dictionary], qubit_count: int) -> void:
+	var resized := _qubit_count != qubit_count
+	_qubit_count = qubit_count
+	_ops = ops
 	_selected = -1
 	_pending = Vector2i(-1, -1)
 	_armed = ""
+	if resized:
+		_reset_frames()
 	_refresh_editor()
-	_hint("Last edit undone.")
+	if resized:
+		_refresh_frame()
 
 
 func _remove(index: int) -> void:
@@ -424,6 +479,14 @@ func _remove(index: int) -> void:
 	_refresh_editor()
 
 
+func _unhandled_key_input(event: InputEvent) -> void:
+	if _running or _selected < 0 or _qasm_layer.visible or not event.is_pressed() or event.is_echo():
+		return
+	if event.keycode in [KEY_DELETE, KEY_BACKSPACE] and not get_viewport().gui_get_focus_owner() is LineEdit:
+		_remove(_selected)
+		get_viewport().set_input_as_handled()
+
+
 func _edit_angle(degrees: float) -> void:
 	if _angle_is_syncing or _running or not is_finite(degrees):
 		return
@@ -434,6 +497,7 @@ func _edit_angle(degrees: float) -> void:
 
 
 func _refresh_editor() -> void:
+	_board.qubit_count = _qubit_count
 	_board.ops = _ops
 	_board.pending = _pending
 	_board.selected = _selected if not _running else -1
@@ -442,7 +506,9 @@ func _refresh_editor() -> void:
 	for control in _editor_controls:
 		control.disabled = _running
 	for gate in _palette_buttons:
+		_palette_buttons[gate].disabled = _running or (_qubit_count < 2 and gate in ["CX", "RZZ"])
 		_palette_buttons[gate].set_pressed_no_signal(_armed == gate and not _running)
+	_refresh_qubit_controls()
 	_angle.editable = not _running
 	_delete_button.disabled = _running or _selected < 0
 	_undo_button.disabled = _running or _undo.is_empty()
@@ -457,9 +523,20 @@ func _refresh_editor() -> void:
 	elif not _armed.is_empty():
 		_hint("%s · Pick a wire and step." % _armed)
 	elif _selected >= 0:
-		_hint(_describe(_ops[_selected]))
+		_hint("%s  ·  Drag to move or press Delete to remove." % _describe(_ops[_selected]))
 	else:
-		_hint("Drag a gate onto a wire, or select a gate and click a slot.")
+		_hint("Drag gates onto a wire or click a gate, then a slot.")
+
+
+func _refresh_qubit_controls() -> void:
+	_add_qubit_button.disabled = _running or _qubit_count >= Quantum.MAX_QUBITS
+	_remove_qubit_menu.disabled = _running or _qubit_count <= 1
+	_qubit_label.text = "%d %s · max %d" % [_qubit_count, "qubit" if _qubit_count == 1 else "qubits", Quantum.MAX_QUBITS]
+	var popup := _remove_qubit_menu.get_popup()
+	if popup.item_count != _qubit_count:
+		popup.clear()
+		for wire in _qubit_count:
+			popup.add_item("%s  /  q%d" % [Qpu.NAMES[wire], wire], wire)
 
 
 func _toggle_run() -> void:
@@ -475,7 +552,7 @@ func _toggle_run() -> void:
 
 func _reset_frames() -> void:
 	_cursor = 0
-	var initial := Quantum.initial()
+	var initial := Quantum.initial(_qubit_count)
 	_frames = [{"state": initial, "metrics": Quantum.metrics(initial)}]
 
 
@@ -519,8 +596,8 @@ func _refresh_transport() -> void:
 	_play_button.disabled = _next_button.disabled
 	_play_button.text = "▶ Play" if _timer.is_stopped() else "Ⅱ Pause"
 	_restart_button.disabled = not _running or _frames.size() <= 1
-	_step_label.text = "STEP %02d / %02d" % [_cursor, _ops.size()]
-	_step_info.text = "Initial state  |0000⟩" if _cursor == 0 else _describe(_ops[_cursor - 1])
+	_step_label.text = "Step %d / %d" % [_cursor, _ops.size()]
+	_step_info.text = "Initial state  |%s⟩" % "0".repeat(_qubit_count) if _cursor == 0 else _describe(_ops[_cursor - 1])
 
 
 func _refresh_frame() -> void:
@@ -539,54 +616,69 @@ func _refresh_frame() -> void:
 			_hint("Measurement recorded. Press Next to continue.")
 		else:
 			_hint("Use Back and Next to inspect each state.")
-	var prev_mode := _model_mode.selected
-	_model_mode.set_item_disabled(4, not measurement)
-	if measurement:
-		_model_mode.select(4)
-	elif prev_mode == 4:
-		_model_mode.select(0)
+	_sync_visualizer_controls()
 	_render_model()
+	_histogram.display(frame.state, _qubit_count)
+	_show_measurement_info(frame)
 	_check_goal(frame.metrics)
 
 
+func _sync_visualizer_controls() -> void:
+	if _focus_menu.item_count == _qubit_count + 1:
+		return
+	_focus_menu.clear()
+	_focus_menu.add_item("Focus: all")
+	for wire in _qubit_count:
+		_focus_menu.add_item("Focus: %s" % Qpu.NAMES[wire])
+	_focus_menu.select(0)
+	_focus_menu.visible = _qubit_count > 1
+	_model_mode.select(0)
+	_model_mode.visible = _qubit_count == Quantum.MAX_QUBITS
+	for wire in Quantum.MAX_QUBITS:
+		_wire_cards[wire].visible = wire < _qubit_count
+
+
 func _render_model() -> void:
-	var frame := _frames[_cursor]
-	var metrics: Dictionary = frame.metrics
-	var mode := _model_mode.selected
-	var histogram := mode == 4 and frame.has("probabilities")
-	var section := mode - 1 if mode > 0 and mode < 4 else -1
-	if stage.histogram != histogram:
-		_focus_menu.select(0)
-	_focus_menu.disabled = histogram
-	stage.display(metrics, frame, section, histogram)
-	presentation_changed.emit(metrics, frame, section, histogram)
-	for wire in 4:
-		_wire_readouts[wire].text = "|r| %.2f   S %.2f" % [metrics.bloch[wire].length(), metrics.singles[wire]]
-		_wire_readouts[wire].tooltip_text = "Bloch vector (%.3f, %.3f, %.3f) · Opposite face entropy %.3f bits" % [
-			metrics.bloch[wire].x, metrics.bloch[wire].y, metrics.bloch[wire].z, metrics.singles[wire]]
-	if histogram:
-		var wires := _wire_names(frame.wires)
-		var outcome := Quantum.bit_string(frame.sample, frame.wires.size())
-		_stage_badge.text = "MEASUREMENT  /  " + " ".join(wires)
-		_model_info.text = "Sample  %s    •    %.1f%% chance    •    %s" % [
-			outcome, 100.0 * frame.probabilities[frame.sample], " · ".join(wires)]
-		var distribution := PackedStringArray()
-		for value in frame.probabilities.size():
-			if frame.probabilities[value] > Quantum.EPS or value == frame.sample:
-				distribution.append("%s   %.2f%%" % [
-					Quantum.bit_string(value, frame.wires.size()), 100.0 * frame.probabilities[value]])
-		_model_info.tooltip_text = "\n".join(distribution)
-	else:
-		_stage_badge.text = "PURE STATE  /  |ψ⟩"
-		var detail := "Core entropy   %.3f bits" % maxf(metrics.core, 0.0)
-		if section >= 0:
-			detail += "     •     %s   %.3f bits" % [
-				_model_mode.get_item_text(mode), maxf(metrics.cuts[section], 0.0)]
-		_model_info.text = detail
-		var pairs := PackedStringArray()
-		for i in Quantum.PAIRS.size():
-			pairs.append("%s   %.3f" % ["".join(_wire_names(Quantum.PAIRS[i])), metrics.pairs[i]])
-		_model_info.tooltip_text = "Pair concurrence\n" + "\n".join(pairs)
+	var metrics: Dictionary = _frames[_cursor].metrics
+	var section := _model_mode.selected - 1 if _qubit_count == Quantum.MAX_QUBITS else -1
+	presentation_changed.emit(metrics, section)
+	stage.display(metrics, section)
+	for wire in _qubit_count:
+		var vector: Vector3 = metrics.bloch[wire]
+		_wire_readouts[wire].text = "X %.2f   Y %.2f   Z %.2f" % [vector.x, vector.y, vector.z] if _qubit_count == 1 else (
+			"|r| %.2f   S %.2f" % [vector.length(), metrics.singles[wire]])
+		_wire_readouts[wire].tooltip_text = "Bloch vector (%.3f, %.3f, %.3f) · Entanglement entropy %.3f bits" % [
+			vector.x, vector.y, vector.z, metrics.singles[wire]]
+	match _qubit_count:
+		1: _model_info.text = "Bloch sphere"
+		2: _model_info.text = "Pair concurrence  %.3f" % metrics.pairs[0]
+		3, 4: _model_info.text = "Minimum cut entropy  %.3f bits" % metrics.core
+	if section >= 0:
+		_model_info.text = "%s  ·  %.3f bits" % [CUT_NAMES[section], metrics.cuts[section]]
+	var pairs := Quantum.pairs_for(_qubit_count)
+	var pair_readouts := PackedStringArray()
+	for i in pairs.size():
+		pair_readouts.append("%s   %.3f" % ["".join(_wire_names(pairs[i])), metrics.pairs[i]])
+	_model_info.tooltip_text = "Pair concurrence\n" + "\n".join(pair_readouts) if not pair_readouts.is_empty() else ""
+
+
+func _show_measurement_info(frame: Dictionary) -> void:
+	if not frame.has("probabilities"):
+		_measurement_info.text = "Bit order: " + " · ".join(_wire_names(range(_qubit_count)))
+		_measurement_info.tooltip_text = ""
+		_measurement_info.add_theme_color_override("font_color", Palette.MUTED)
+		return
+	var wires := " · ".join(_wire_names(frame.wires))
+	var outcome := Quantum.bit_string(frame.sample, frame.wires.size())
+	_measurement_info.text = "Measured %s on %s  ·  %.1f%% before collapse" % [
+		outcome, wires, 100.0 * frame.probabilities[frame.sample]]
+	var distribution := PackedStringArray(["Measurement probabilities before collapse"])
+	for value in frame.probabilities.size():
+		if frame.probabilities[value] > Quantum.EPS:
+			distribution.append("%s   %.2f%%" % [
+				Quantum.bit_string(value, frame.wires.size()), 100.0 * frame.probabilities[value]])
+	_measurement_info.tooltip_text = "\n".join(distribution)
+	_measurement_info.add_theme_color_override("font_color", Palette.AMBER)
 
 
 func _reset_view() -> void:
@@ -598,15 +690,18 @@ func _choose_mission(index: int) -> void:
 	_mission = index
 	_solved = false
 	if index > 0:
-		_replace_ops([], "Build a circuit for this challenge.")
+		_replace_ops([], "Build a circuit for this challenge.", MISSION_WIDTHS[index])
 	_refresh_challenge()
 
 
 func _check_goal(metrics: Dictionary) -> void:
-	if _mission == 0 or _solved or not _running:
+	if _mission == 0 or _solved or not _running or _qubit_count < MISSION_WIDTHS[_mission]:
 		return
 	match _mission:
-		1: _solved = metrics.pairs[0] >= 0.999 and metrics.bloch[2].length() >= 0.999 and metrics.bloch[3].length() >= 0.999
+		1:
+			_solved = metrics.pairs[0] >= 0.999
+			for wire in range(2, _qubit_count):
+				_solved = _solved and metrics.bloch[wire].length() >= 0.999
 		2: _solved = metrics.pairs[0] >= 0.999 and metrics.pairs[5] >= 0.999
 		3: _solved = metrics.core >= 0.999
 	_refresh_challenge()
@@ -618,7 +713,7 @@ func _refresh_challenge() -> void:
 
 
 func _open_qasm() -> void:
-	_qasm_text.text = Qasm.encode(_ops)
+	_qasm_text.text = Qasm.encode(_ops, _qubit_count)
 	_qasm_status.text = "Supported: H, X, Y, Z, RX, RY, RZ, CX, RZZ and measure."
 	_qasm_status.add_theme_color_override("font_color", Palette.MUTED)
 	_qasm_layer.show()
@@ -641,7 +736,7 @@ func _import_qasm() -> void:
 		_qasm_status.text = parsed.error
 		_qasm_status.add_theme_color_override("font_color", Palette.AMBER)
 	else:
-		_replace_ops(parsed.ops, "Loaded %d operations from OpenQASM." % parsed.ops.size())
+		_replace_ops(parsed.ops, "Loaded %d operations from OpenQASM." % parsed.ops.size(), parsed.qubit_count)
 		_close_qasm()
 
 
@@ -664,15 +759,22 @@ func _hint(message: String) -> void:
 	_work_hint.tooltip_text = message
 
 
+func _load_example(index: int) -> void:
+	_replace_ops(_example(index), "Example loaded.", EXAMPLE_WIDTHS[index])
+
+
 func _example(index: int) -> Array[Dictionary]:
-	var circuit: Array[Dictionary] = [{"gate": "H", "wires": [0]}, {"gate": "CX", "wires": [0, 1]}]
-	match index:
-		1: circuit.append_array([{"gate": "H", "wires": [2]}, {"gate": "CX", "wires": [2, 3]}])
-		2: circuit.append_array([{"gate": "CX", "wires": [0, 2]}, {"gate": "CX", "wires": [0, 3]}])
-		3:
-			circuit = [{"gate": "H", "wires": [0]}, {"gate": "RZ", "wires": [0], "angle": PI},
-				{"gate": "H", "wires": [0]}]
-	circuit.append({"gate": "M", "wires": [0, 1, 2, 3]})
+	var circuit: Array[Dictionary] = [{"gate": "H", "wires": [0]}]
+	if index == 0:
+		return circuit
+	if index == 4:
+		circuit.append_array([{"gate": "RZ", "wires": [0], "angle": PI}, {"gate": "H", "wires": [0]}])
+	else:
+		circuit.append({"gate": "CX", "wires": [0, 1]})
+		match index:
+			2: circuit.append_array([{"gate": "H", "wires": [2]}, {"gate": "CX", "wires": [2, 3]}])
+			3: circuit.append_array([{"gate": "CX", "wires": [0, 2]}, {"gate": "CX", "wires": [0, 3]}])
+	circuit.append({"gate": "M", "wires": range(EXAMPLE_WIDTHS[index])})
 	return circuit
 
 
@@ -712,12 +814,6 @@ func _card(parent: Node, fill: Color, x: int, y: int) -> PanelContainer:
 	card.add_theme_stylebox_override("panel", Palette.box(fill, Palette.BORDER, 11, x, y))
 	parent.add_child(card)
 	return card
-
-
-func _badge(parent: Node, text: String, color: Color) -> void:
-	var badge := _card(parent, Color("#171f38"), 10, 6)
-	badge.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	_label(badge, text, 11, color)
 
 
 func _label(parent: Node, text: String, font_size: int, color: Color) -> Label:
